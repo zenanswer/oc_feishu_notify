@@ -205,6 +205,33 @@ const buildCard = (kind: NotifyKind, lines: string[], footer: string) => ({
 })
 
 // ---------------------------------------------------------------------------
+// zellij attached 检测（macOS 无 ss 时的等价实现）
+// ---------------------------------------------------------------------------
+
+/**
+ * 从 `netstat -f unix` 输出判断 zellij 会话 socket 是否有客户端连接。
+ * 与 Linux `ss -x` 的 ESTAB 判定同构：
+ * - 路径行（尾列为 socket 路径，形如 $TMPDIR/zellij-<uid>/<contract>/<会话名>）
+ * - 已连接的 unix stream 是两行互指：客户端行的 Conn 列 = 服务端行（路径行）的 Address 列
+ * 列序：Address Type Recv-Q Send-Q Inode Conn Refs Nextref Addr
+ */
+export const zellijAttachedFromNetstat = (out: string, session: string): boolean => {
+  const pathRe = new RegExp(`zellij[^/]*(?:/[^/]+)?/${escapeRegExp(session)}\\s*$`)
+  const lines = out.split("\n")
+  const pcbs = new Set<string>()
+  for (const l of lines) {
+    if (!pathRe.test(l)) continue
+    const addr = l.trim().split(/\s+/)[0]
+    if (addr) pcbs.add(addr)
+  }
+  if (pcbs.size === 0) return false
+  return lines.some((l) => {
+    const c = l.trim().split(/\s+/)
+    return c[1] === "stream" && c[5] !== undefined && pcbs.has(c[5])
+  })
+}
+
+// ---------------------------------------------------------------------------
 // 插件
 // ---------------------------------------------------------------------------
 
@@ -250,7 +277,9 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
 
   /**
    * 用户是否 attached 在终端复用器上（人在屏幕前）：
-   * - zellij: 会话 socket (/run/user/$UID/zellij/<版本>/<会话名>) 上有 ESTAB 连接
+   * - zellij: 会话 socket 上有客户端连接
+   *   - Linux: `ss -x` 匹配 /run/user/$UID/zellij/<版本>/<会话名> 的 ESTAB 行
+   *   - macOS: 无 ss，用内置 `netstat -f unix`（见 zellijAttachedFromNetstat）
    * - tmux:   tmux list-clients 有输出
    * - 不在复用器 / 检测失败 → false（fail-open，宁发勿漏）
    */
@@ -258,6 +287,10 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
     try {
       const zellijSession = process.env.ZELLIJ_SESSION_NAME?.trim()
       if (zellijSession) {
+        if (process.platform === "darwin") {
+          const out = await $`netstat -f unix`.nothrow().text()
+          return zellijAttachedFromNetstat(out, zellijSession)
+        }
         const out = await $`ss -x`.nothrow().text()
         const re = new RegExp(`zellij/[^/]+/${escapeRegExp(zellijSession)}\\s`)
         return out.split("\n").some((l) => l.includes("ESTAB") && re.test(l))

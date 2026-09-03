@@ -59,7 +59,8 @@ export FEISHU_NOTIFY_WHEN="detached"
 
 | 环境 | 检测方式 | attached 判定 |
 |---|---|---|
-| zellij | `ss -x` 统计会话 socket `/run/user/$UID/zellij/<版本>/<会话名>` 的 ESTAB 连接数 | ≥ 1 条 ESTAB |
+| zellij（Linux） | `ss -x` 统计会话 socket `/run/user/$UID/zellij/<版本>/<会话名>` 的 ESTAB 连接数 | ≥ 1 条 ESTAB |
+| zellij（macOS） | 无 `ss`，用内置 `netstat -f unix`：会话路径行 `Address` 与客户端行 `Conn` 互指即有连接（原理同 ss） | 有连接 |
 | tmux | `tmux list-clients` 是否有输出 | 有输出 |
 | 裸 SSH / 本地终端 | 无法检测 | 视为无人（照发，宁发勿漏） |
 
