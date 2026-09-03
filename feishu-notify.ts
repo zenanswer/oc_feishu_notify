@@ -17,8 +17,11 @@
  * - FEISHU_NOTIFY_EMAIL      接收人邮箱（二选一，优先级低于 open_id/mobile）
  * - FEISHU_API_BASE          API 域名，默认 https://open.feishu.cn
  * - FEISHU_PROXY             出网代理，如 http://proxy:3128（可选）
- * - FEISHU_NOTIFY_WHEN       always（默认，总是发送）| detached（仅当终端复用器
- *                            zellij/tmux 无人 attached 时发送，人在屏幕前跳过）
+ * - FEISHU_NOTIFY_WHEN       always（默认，总是发送）| detached（仅当"人看不到"时发送：
+ *                            zellij/tmux 无人 attached；裸 SSH 一律不发；本地裸终端按
+ *                            键鼠空闲判定人是否离开）
+ * - FEISHU_PRESENT_IDLE_SEC  本地裸终端在场阈值秒数（默认 300；键鼠空闲 ≥ 阈值视为离开；
+ *                            设 0 禁用在场检测，本地裸终端始终发送）
  *
  * 所需应用权限：
  * - im:message:send_as_bot      发送私聊消息
@@ -232,6 +235,25 @@ export const zellijAttachedFromNetstat = (out: string, session: string): boolean
 }
 
 // ---------------------------------------------------------------------------
+// 本地在场检测（macOS 裸终端用，无复用器时判断人是否在电脑前）
+// ---------------------------------------------------------------------------
+
+/**
+ * 根据键鼠空闲秒数判断人是否在电脑前：
+ * - idleSec 未知（undefined）→ undefined（无法判定，调用方 fail-open）
+ * - idleSec < threshold → true（人在场）
+ * - idleSec >= threshold → false（人已离开）
+ * - threshold 为 0 时恒为 false（禁用在场检测，始终按"离开"处理）
+ */
+export const presentFromIdle = (
+  idleSec: number | undefined,
+  threshold: number,
+): boolean | undefined => {
+  if (idleSec === undefined) return undefined
+  return idleSec < threshold
+}
+
+// ---------------------------------------------------------------------------
 // 插件
 // ---------------------------------------------------------------------------
 
@@ -266,6 +288,9 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
   const projectName = project.worktree?.split("/").filter(Boolean).pop() || directory
   const notifyWhen =
     process.env.FEISHU_NOTIFY_WHEN?.trim() === "detached" ? "detached" : "always"
+  // 本地裸终端的在场阈值（秒）：键鼠空闲超过该时长视为"人已离开"；0 = 禁用在场检测
+  const idleRaw = Number(process.env.FEISHU_PRESENT_IDLE_SEC?.trim())
+  const presentIdleSec = Number.isFinite(idleRaw) && idleRaw >= 0 ? idleRaw : 300
 
   await log({
     body: {
@@ -276,12 +301,33 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
   })
 
   /**
-   * 用户是否 attached 在终端复用器上（人在屏幕前）：
+   * macOS 本机人是否在电脑前（全局键鼠空闲时长，无需任何权限）；失败 → undefined
+   */
+  const isUserPresentOnMac = async (): Promise<boolean | undefined> => {
+    try {
+      const out =
+        await $`ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}'`
+          .nothrow()
+          .text()
+      const t = out.trim()
+      if (!/^\d+$/.test(t)) return undefined
+      return presentFromIdle(Number(t) / 1e9, presentIdleSec)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 用户是否 attached 在终端复用器上 / 人是否在场（人在屏幕前）：
    * - zellij: 会话 socket 上有客户端连接
    *   - Linux: `ss -x` 匹配 /run/user/$UID/zellij/<版本>/<会话名> 的 ESTAB 行
    *   - macOS: 无 ss，用内置 `netstat -f unix`（见 zellijAttachedFromNetstat）
    * - tmux:   tmux list-clients 有输出
-   * - 不在复用器 / 检测失败 → false（fail-open，宁发勿漏）
+   * - 裸终端:
+   *   - SSH/远程会话：无法感知对端是否有人在看 → 视为在场（不发）
+   *   - macOS 本机: 键鼠空闲 < FEISHU_PRESENT_IDLE_SEC 视为在场（不发），
+   *     离开/检测失败 → 视为不在场（发，fail-open 宁发勿漏）
+   *   - 其他平台 / 检测失败 → 视为不在场（照发）
    */
   const isUserAttached = async (): Promise<boolean> => {
     try {
@@ -299,6 +345,10 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
         const out = await $`tmux list-clients`.nothrow().text()
         return out.trim().length > 0
       }
+      if (process.env.SSH_CONNECTION?.trim()) return true
+      if (process.platform === "darwin") {
+        return (await isUserPresentOnMac()) ?? false
+      }
       return false
     } catch {
       return false
@@ -312,7 +362,7 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
         body: {
           service: "feishu-notify",
           level: "info",
-          message: "skipped: user attached to terminal multiplexer",
+          message: "skipped: user attached to multiplexer or present locally",
         },
       })
       return

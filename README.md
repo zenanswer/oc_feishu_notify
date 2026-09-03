@@ -46,8 +46,10 @@ export FEISHU_APP_SECRET="xxx"
 export FEISHU_NOTIFY_MOBILE="+8613800138000"
 # export FEISHU_NOTIFY_OPEN_ID="ou_xxx"
 # export FEISHU_NOTIFY_EMAIL="you@company.com"
-# 通知模式：always（默认，总是发送）| detached（推荐，仅终端无人时发送）
+# 通知模式：always（默认，总是发送）| detached（推荐，仅"人看不到"时发送）
 export FEISHU_NOTIFY_WHEN="detached"
+# 本地裸终端在场阈值：键鼠空闲超过该秒数视为离开（默认 300，0 = 禁用在场检测）
+# export FEISHU_PRESENT_IDLE_SEC="300"
 # 可选：
 # export FEISHU_API_BASE="https://open.feishu.cn"  # 默认值
 # export FEISHU_PROXY="http://proxy:3128"          # 出网需要代理时
@@ -62,13 +64,17 @@ export FEISHU_NOTIFY_WHEN="detached"
 | zellij（Linux） | `ss -x` 统计会话 socket `/run/user/$UID/zellij/<版本>/<会话名>` 的 ESTAB 连接数 | ≥ 1 条 ESTAB |
 | zellij（macOS） | 无 `ss`，用内置 `netstat -f unix`：会话路径行 `Address` 与客户端行 `Conn` 互指即有连接（原理同 ss） | 有连接 |
 | tmux | `tmux list-clients` 是否有输出 | 有输出 |
-| 裸 SSH / 本地终端 | 无法检测 | 视为无人（照发，宁发勿漏） |
+| 本地裸终端（macOS） | `ioreg` 读 `HIDIdleTime`（全局键鼠空闲时长，无需权限） | 空闲 < `FEISHU_PRESENT_IDLE_SEC`（默认 300 秒）视为在场（不发）；≥ 阈值视为离开（发） |
+| 裸 SSH / 远程终端 | 无法感知对端有没有人看 | 视为在场（不发） |
+| 其他平台裸终端 / 检测失败 | — | 视为离开（照发，宁发勿漏） |
 
 - `attached` → 跳过飞书（terminal bell 插件已够用）
 - `detached`（SSH 断开 / 人离开）→ 发飞书
 - 检测命令失败也视为无人（fail-open，避免漏通知）
 
-局限：裸 SSH（无 zellij/tmux）下无法区分"人在看"与"人走了"，始终发送。
+局限：本地裸终端下，"人在电脑前但长时间无键鼠输入"（看视频/开会）会被视为离开，照发；锁屏无需单独检测（锁屏必然伴随键鼠空闲增长）。裸 SSH 场景无法感知对端是否有人，一律不发送。
+
+缺省阈值可用 `FEISHU_PRESENT_IDLE_SEC` 调整（秒，默认 300，设 0 禁用在场检测）。
 
 缺少必需变量时插件自动禁用（opencode 日志中会记录原因）。
 
