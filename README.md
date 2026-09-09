@@ -10,7 +10,7 @@ SSH 断开时，通过飞书应用机器人**私聊推送** opencode 的状态�
 | `question` 工具 | 🔵 蓝色 | Agent 有问题等你回答 |
 
 - 过滤子 agent 会话（Task 工具产生的 session），只在主会话通知
-- **智能模式**（`FEISHU_NOTIFY_WHEN=detached`）：人在终端前（zellij/tmux attached）只靠终端 bell，断开/离开后才发飞书
+- **智能模式**（`FEISHU_NOTIFY_WHEN=detached`）：人在终端前（herdr/zellij/tmux attached）只靠终端 bell，断开/离开后才发飞书
 - 单文件 TypeScript，零 npm 依赖（Bun 自带 fetch/crypto）
 - 发送失败只记日志，绝不影响 opencode 主流程
 
@@ -22,7 +22,7 @@ SSH 断开时，通过飞书应用机器人**私聊推送** opencode 的状态�
 
 重启 opencode 生效。与 `opencode-terminal-bell-notifier` 可共存（本地终端响铃 + 断开后飞书推送）。
 
-> **重要**：SSH 断开时插件要能发通知，opencode 进程必须存活。请在 **tmux/screen** 中运行 opencode。
+> **重要**：SSH 断开时插件要能发通知，opencode 进程必须存活。请在 **herdr**（或 tmux/screen）中运行 opencode。
 
 ## 飞书应用配置（一次性）
 
@@ -61,6 +61,8 @@ export FEISHU_NOTIFY_WHEN="detached"
 
 | 环境 | 检测方式 | attached 判定 |
 |---|---|---|
+| herdr | `ss -x` 统计 UI 客户端 socket（`~/.config/herdr/herdr-client.sock`，named session 为 `sessions/<name>/herdr-client.sock`）的 ESTAB 连接数 | ≥ 1 条 ESTAB |
+| herdr（macOS） | 无 `ss`，用内置 `netstat -f unix`：`herdr-client.sock` 路径行与客户端行互指即有连接（原理同 ss） | 有连接 |
 | zellij（Linux） | `ss -x` 统计会话 socket `/run/user/$UID/zellij/<版本>/<会话名>` 的 ESTAB 连接数 | ≥ 1 条 ESTAB |
 | zellij（macOS） | 无 `ss`，用内置 `netstat -f unix`：会话路径行 `Address` 与客户端行 `Conn` 互指即有连接（原理同 ss） | 有连接 |
 | tmux | `tmux list-clients` 是否有输出 | 有输出 |

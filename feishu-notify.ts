@@ -18,7 +18,7 @@
  * - FEISHU_API_BASE          API 域名，默认 https://open.feishu.cn
  * - FEISHU_PROXY             出网代理，如 http://proxy:3128（可选）
  * - FEISHU_NOTIFY_WHEN       always（默认，总是发送）| detached（仅当"人看不到"时发送：
- *                            zellij/tmux 无人 attached；裸 SSH 一律不发；本地裸终端按
+ *                            herdr/zellij/tmux 无人 attached；裸 SSH 一律不发；本地裸终端按
  *                            键鼠空闲判定人是否离开）
  * - FEISHU_PRESENT_IDLE_SEC  本地裸终端在场阈值秒数（默认 300；键鼠空闲 ≥ 阈值视为离开；
  *                            设 0 禁用在场检测，本地裸终端始终发送）
@@ -208,7 +208,7 @@ const buildCard = (kind: NotifyKind, lines: string[], footer: string) => ({
 })
 
 // ---------------------------------------------------------------------------
-// zellij attached 检测（macOS 无 ss 时的等价实现）
+// 复用器 attached 检测（macOS 无 ss 时的等价实现）
 // ---------------------------------------------------------------------------
 
 /**
@@ -224,6 +224,25 @@ export const zellijAttachedFromNetstat = (out: string, session: string): boolean
   const pcbs = new Set<string>()
   for (const l of lines) {
     if (!pathRe.test(l)) continue
+    const addr = l.trim().split(/\s+/)[0]
+    if (addr) pcbs.add(addr)
+  }
+  if (pcbs.size === 0) return false
+  return lines.some((l) => {
+    const c = l.trim().split(/\s+/)
+    return c[1] === "stream" && c[5] !== undefined && pcbs.has(c[5])
+  })
+}
+
+/**
+ * 从 `netstat -f unix` 输出判断 herdr UI 客户端 socket 是否有客户端连接。
+ * 原理同 zellijAttachedFromNetstat：`herdr-client.sock` 路径行与客户端行互指。
+ */
+export const herdrAttachedFromNetstat = (out: string): boolean => {
+  const lines = out.split("\n")
+  const pcbs = new Set<string>()
+  for (const l of lines) {
+    if (!l.includes("herdr-client.sock")) continue
     const addr = l.trim().split(/\s+/)[0]
     if (addr) pcbs.add(addr)
   }
@@ -301,6 +320,7 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
   })
 
   /**
+  /**
    * macOS 本机人是否在电脑前（全局键鼠空闲时长，无需任何权限）；失败 → undefined
    */
   const isUserPresentOnMac = async (): Promise<boolean | undefined> => {
@@ -319,6 +339,10 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
 
   /**
    * 用户是否 attached 在终端复用器上 / 人是否在场（人在屏幕前）：
+   * - herdr:  UI 客户端 socket（~/.config/herdr/herdr-client.sock，
+   *           named session 为 sessions/<name>/herdr-client.sock）上有客户端连接
+   *   - Linux: `ss -x` 的 ESTAB 行
+   *   - macOS: 无 ss，用内置 `netstat -f unix`（见 herdrAttachedFromNetstat）
    * - zellij: 会话 socket 上有客户端连接
    *   - Linux: `ss -x` 匹配 /run/user/$UID/zellij/<版本>/<会话名> 的 ESTAB 行
    *   - macOS: 无 ss，用内置 `netstat -f unix`（见 zellijAttachedFromNetstat）
@@ -331,6 +355,16 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
    */
   const isUserAttached = async (): Promise<boolean> => {
     try {
+      if (process.env.HERDR_ENV === "1") {
+        if (process.platform === "darwin") {
+          const out = await $`netstat -f unix`.nothrow().text()
+          return herdrAttachedFromNetstat(out)
+        }
+        const out = await $`ss -x`.nothrow().text()
+        return out
+          .split("\n")
+          .some((l) => l.includes("ESTAB") && l.includes("herdr-client.sock"))
+      }
       const zellijSession = process.env.ZELLIJ_SESSION_NAME?.trim()
       if (zellijSession) {
         if (process.platform === "darwin") {
