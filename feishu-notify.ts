@@ -320,7 +320,6 @@ export const FeishuNotifyPlugin: Plugin = async ({ client, project, directory, $
   })
 
   /**
-  /**
    * macOS 本机人是否在电脑前（全局键鼠空闲时长，无需任何权限）；失败 → undefined
    */
   const isUserPresentOnMac = async (): Promise<boolean | undefined> => {
