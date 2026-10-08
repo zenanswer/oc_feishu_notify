@@ -1,0 +1,31 @@
+{
+  "name": "oc-feishu-notify",
+  "version": "2.0.0",
+  "description": "OpenCode 2.x plugin: push opencode status (done/error/permission/question) to Feishu bot DM when you are away from the terminal",
+  "author": "zenanswer",
+  "license": "MIT",
+  "type": "module",
+  "main": "feishu-notify.ts",
+  "types": "feishu-notify.ts",
+  "files": [
+    "feishu-notify.ts"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "feishu",
+    "lark",
+    "notification"
+  ],
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zenanswer/oc_feishu_notify.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zenanswer/oc_feishu_notify/issues"
+  },
+  "homepage": "https://github.com/zenanswer/oc_feishu_notify#readme"
+}

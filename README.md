@@ -20,9 +20,19 @@ SSH 断开时，通过飞书应用机器人**私聊推送** opencode 的状态�
 
 ## 部署
 
+方式一（推荐，纳入 `opencode plugin update` 自动更新，需要 package.json）：
+
 ```bash
-./install.sh   # symlink 到 ~/.config/opencode/plugins/feishu-notify.ts
+opencode plugin add 'github:zenanswer/oc_feishu_notify#opencode_v2'
 ```
+
+方式二（本地源码迭代，symlink 到 `~/.config/opencode/plugins/feishu-notify.ts`）：
+
+```bash
+./install.sh
+```
+
+两种方式二选一，同时使用会导致插件重复加载、重复通知。
 
 重启 opencode 生效。与 `opencode-terminal-bell-notifier` 可共存（本地终端响铃 + 断开后飞书推送）。
 
