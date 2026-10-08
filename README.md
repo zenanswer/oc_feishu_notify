@@ -1,18 +1,22 @@
 # opencode 飞书通知插件
 
-SSH 断开时，通过飞书应用机器人**私聊推送** opencode 的状态通知：
+SSH 断开时，通过飞书应用机器人**私聊推送** opencode 的状态通知（基于 **OpenCode 2.x** 插件 API）。
 
-| 事件 | 卡片 | 说明 |
+| 事件（OpenCode 2.x） | 卡片 | 说明 |
 |---|---|---|
-| `session.idle` | ✅ 绿色 | 任务完成，含会话标题、目录、耗时、改动统计 |
-| `session.error` | 🔴 红色 | 会话出错，含错误信息 |
+| `session.execution.succeeded`（`session.idle` 兜底） | ✅ 绿色 | 一轮任务完成，含会话标题、目录、耗时 |
+| `session.execution.failed` | 🔴 红色 | 会话出错，含错误信息 |
 | `permission.asked` | 🟠 橙色 | Agent 等待你批准权限 |
-| `question` 工具 | 🔵 蓝色 | Agent 有问题等你回答 |
+| `form.created` | 🔵 蓝色 | Agent 有问题等你回答（2.0 用表单取代了 `question` 工具） |
 
 - 过滤子 agent 会话（Task 工具产生的 session），只在主会话通知
 - **智能模式**（`FEISHU_NOTIFY_WHEN=detached`）：人在终端前（herdr/zellij/tmux attached）只靠终端 bell，断开/离开后才发飞书
-- 单文件 TypeScript，零 npm 依赖（Bun 自带 fetch/crypto）
+- 采用 OpenCode 2.x 插件 API：`export default Plugin.define({ id, setup(ctx) })`，事件用 `ctx.event.subscribe({ signal })` 订阅
+- 单文件 TypeScript；除 opencode 运行时（`@opencode/plugin`）与 Node 内置模块外，无第三方依赖
 - 发送失败只记日志，绝不影响 opencode 主流程
+
+> **兼容性**：本分支对应 **OpenCode 2.x**。OpenCode 1.x 请使用仓库 `main` 分支上的旧实现。
+> 2.x 插件运行在后台服务进程里，stdout 指向 `/dev/null`，因此本地提示（智能模式下人在跟前时）改为把 OSC 9 / bell 序列写入 TUI 的 pty。
 
 ## 部署
 
@@ -78,7 +82,7 @@ export FEISHU_NOTIFY_WHEN="detached"
 
 缺省阈值可用 `FEISHU_PRESENT_IDLE_SEC` 调整（秒，默认 300，设 0 禁用在场检测）。
 
-缺少必需变量时插件自动禁用（opencode 日志中会记录原因）。
+缺少必需变量时插件自动禁用，加载时会写入本地日志 `/tmp/opencode/feishu-notify.log`（可用 `FEISHU_LOG` 覆盖路径）。该日志也记录通知跳过 / 发送失败的原因。
 
 ## 手动测试
 
