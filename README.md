@@ -10,9 +10,9 @@ SSH 断开时，通过飞书应用机器人**私聊推送** opencode 的状态�
 | `form.created` | 🔵 蓝色 | Agent 有问题等你回答（2.0 用表单取代了 `question` 工具） |
 
 - 过滤子 agent 会话（Task 工具产生的 session），只在主会话通知
-- **智能模式**（`FEISHU_NOTIFY_WHEN=detached`）：人在终端前（herdr/zellij/tmux attached）只靠终端 bell，断开/离开后才发飞书
+- **智能模式**（`FEISHU_NOTIFY_WHEN=detached`）：只有“看不到这个会话”时才发飞书，否则只做本地终端提示（判定见下文）
 - 采用 OpenCode 2.x 插件 API：`export default Plugin.define({ id, setup(ctx) })`，事件用 `ctx.event.subscribe({ signal })` 订阅
-- 单文件 TypeScript；除 opencode 运行时（`@opencode/plugin`）与 Node 内置模块外，无第三方依赖
+- TypeScript：`feishu-notify.ts`（插件）+ `detect.ts`（探测层）；除 opencode 运行时（`@opencode/plugin`）与 Node 内置模块外，无第三方依赖
 - 发送失败只记日志，绝不影响 opencode 主流程
 
 > **兼容性**：本分支对应 **OpenCode 2.x**。OpenCode 1.x 请使用仓库 `main` 分支上的旧实现。
@@ -62,37 +62,66 @@ export FEISHU_NOTIFY_MOBILE="+8613800138000"
 # export FEISHU_NOTIFY_EMAIL="you@company.com"
 # 通知模式：always（默认，总是发送）| detached（推荐，仅"人看不到"时发送）
 export FEISHU_NOTIFY_WHEN="detached"
-# 本地裸终端在场阈值：键鼠空闲超过该秒数视为离开（默认 300，0 = 禁用在场检测）
+# 本地键鼠空闲阈值：超过该秒数视为离开（默认 300，0 = 禁用该条）
 # export FEISHU_PRESENT_IDLE_SEC="300"
+# 读取 opencode “未读”状态前的等待（毫秒，默认 1000，避开与 TUI 的竞态）
+# export FEISHU_VIEW_SETTLE_MS="1000"
+# 关闭 opencode “未读”信号（默认开启）
+# export FEISHU_UNREAD="0"
 # 可选：
 # export FEISHU_API_BASE="https://open.feishu.cn"  # 默认值
 # export FEISHU_PROXY="http://proxy:3128"          # 出网需要代理时
 ```
 
-## 智能模式（detached）的检测原理
+## 智能模式（detached）的判定原理
 
-人在不在终端前，通过终端复用器的 **attached 状态**判断：
+“看不看得到”拆成两类信号：
 
-| 环境 | 检测方式 | attached 判定 |
-|---|---|---|
-| herdr | `ss -x` 统计 UI 客户端 socket（`~/.config/herdr/herdr-client.sock`，named session 为 `sessions/<name>/herdr-client.sock`）的 ESTAB 连接数 | ≥ 1 条 ESTAB |
-| herdr（macOS） | 无 `ss`，用内置 `netstat -f unix`：`herdr-client.sock` 路径行与客户端行互指即有连接（原理同 ss） | 有连接 |
-| zellij（Linux） | `ss -x` 统计会话 socket `/run/user/$UID/zellij/<版本>/<会话名>` 的 ESTAB 连接数 | ≥ 1 条 ESTAB |
-| zellij（macOS） | 无 `ss`，用内置 `netstat -f unix`：会话路径行 `Address` 与客户端行 `Conn` 互指即有连接（原理同 ss） | 有连接 |
-| tmux | `tmux list-clients` 是否有输出 | 有输出 |
-| 本地裸终端（macOS） | `ioreg` 读 `HIDIdleTime`（全局键鼠空闲时长，无需权限） | 空闲 < `FEISHU_PRESENT_IDLE_SEC`（默认 300 秒）视为在场（不发）；≥ 阈值视为离开（发） |
-| 裸 SSH / 远程终端 | 无法感知对端有没有人看 | 视为在场（不发） |
-| 其他平台裸终端 / 检测失败 | — | 视为离开（照发，宁发勿漏） |
+- **presence（有人吗）**：本地 → 键鼠空闲；远程 → 复用器 attached
+- **attention（在看这个页面吗）**：opencode 自身 `unread` + 复用器 pane 级
 
-- `attached` → 跳过飞书（terminal bell 插件已够用）
-- `detached`（SSH 断开 / 人离开）→ 发飞书
-- 检测命令失败也视为无人（fail-open，避免漏通知）
+“本地 / 远程”与“是否在复用器里”是**正交**的（本地也可能套在 tmux/herdr/zellij 里），所以并列组合：
 
-局限：本地裸终端下，"人在电脑前但长时间无键鼠输入"（看视频/开会）会被视为离开，照发；锁屏无需单独检测（锁屏必然伴随键鼠空闲增长）。裸 SSH 场景无法感知对端是否有人，一律不发送。
+```
+unread        = session.time.idle > session.time.viewed   # 该轮完成但 TUI 没确认（失焦 / 显示别的 tab）
+inMux         = TUI 跑在 herdr/zellij/tmux 里
+muxOk         = 所有检测到的复用器都“有人接着”
+localSeat     = 本机有交互座席（键鼠空闲可测）
+sessionRemote = 会话来自 ssh/远程（socket 反查对端进程）
 
-缺省阈值可用 `FEISHU_PRESENT_IDLE_SEC` 调整（秒，默认 300，设 0 禁用在场检测）。
+notify = unread
+       || (inMux && !muxOk)
+       || (localSeat && !sessionRemote && idleSec >= FEISHU_PRESENT_IDLE_SEC)
+```
 
-缺少必需变量时插件自动禁用，加载时会写入本地日志 `/tmp/opencode/feishu-notify.log`（可用 `FEISHU_LOG` 覆盖路径）。该日志也记录通知跳过 / 发送失败的原因。
+| 信号 | 探测方式 |
+|---|---|
+| `unread` | 读 `session.time.idle/viewed`，`unread = idle > viewed`（或 viewed 缺失）。延迟 `FEISHU_VIEW_SETTLE_MS` 再读，避开与 TUI 的竞态 |
+| 键鼠空闲（本地） | macOS `ioreg HIDIdleTime`；Linux `xprintidle` → D-Bus ScreenSaver → `loginctl IdleHint`。无座席/无头机测不到 → `undefined` |
+| herdr attached | `herdr-client.sock` 是否有 accept（macOS `netstat -f unix`；Linux `ss -x`） |
+| zellij attached | `zellij action list-clients` 是否有 client 聚焦本 pane（pane 级） |
+| tmux attached | `#{window_active_clients}`（`TMUX_PANE` 所在 window，window 级；不依赖 `focus-events`） |
+| 本地 / 远程 | **socket 反查对端进程**：accept 行的 `Conn` = 客户端 pcb → `lsof -U` 解析 PID → 祖先链找 `sshd`；解析不出 ⇒ 远程 |
+
+要点与局限：
+
+- **`unread` 是「注意力」信号，不是「有人吗」**：本地焦点由你直接控制；远程焦点由复用器把你的客户端焦点转发给远端 TUI（herdr 实测会）。
+- **远程无法感知“屏幕前有没有人”**：远端插件只能知道 client 是否 attached、在看哪个 pane。因此“client 仍 attached 但你人已离开笔记本”远程**无法**检测 → 不提醒（只能靠 detach/断连）。
+- tmux 默认 `focus-events off`：`unread` 对 tmux 无效，但 tmux 走原生 `window_active_clients`，不受影响。
+- zellij 不支持 1004 聚焦事件：`unread` 感知不到 zellij 切 tab，改用 `list-clients` pane 级。
+- 嵌套复用器：所有检测到的复用器都 attached 才算 `muxOk`。
+- 检测命令失败 / 判定异常：视为“看不到”（fail-open，宁发勿漏）。
+- 本地“人在但长时间无键鼠”（看视频/开会）→ 判成离开照发。
+
+缺少必需变量时插件自动禁用，加载时写入本地日志 `/tmp/opencode/feishu-notify.log`（`FEISHU_LOG` 可覆盖）。日志也记录每次决策（`decide present=... unread=... remote=... idleSec=... mux=...`）与发送结果；`FEISHU_DEBUG=1` 开详细日志。
+
+## 开发 / 测试
+
+```bash
+node --test test/detect.test.ts   # 纯函数单测：判定表 / netstat / lsof / idle / env 解析
+```
+
+探测逻辑集中在 `detect.ts`（不依赖 `@opencode/plugin`，可直接用 `node` 运行）。
 
 ## 手动测试
 

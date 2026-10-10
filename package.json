@@ -1,15 +1,19 @@
 {
   "name": "oc-feishu-notify",
-  "version": "2.0.0",
-  "description": "OpenCode 2.x plugin: push opencode status (done/error/permission/question) to Feishu bot DM when you are away from the terminal",
+  "version": "2.1.0",
+  "description": "OpenCode 2.x plugin: push opencode status (done/error/permission/question) to Feishu bot DM only when you cannot see the session",
   "author": "zenanswer",
   "license": "MIT",
   "type": "module",
   "main": "feishu-notify.ts",
   "types": "feishu-notify.ts",
   "files": [
-    "feishu-notify.ts"
+    "feishu-notify.ts",
+    "detect.ts"
   ],
+  "scripts": {
+    "test": "node --test test/detect.test.ts"
+  },
   "keywords": [
     "opencode",
     "opencode-plugin",

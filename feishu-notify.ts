@@ -1,38 +1,47 @@
 /**
  * opencode 飞书通知插件（opencode 2.0 版）
  *
- * 在 SSH 断开时通过飞书应用机器人私聊推送 opencode 状态：
- * - 任务完成 (`session.idle`)
- * - 会话出错 (`session.execution.failed`)
- * - 权限请求 (`permission.asked`)
- * - Agent 提问 (`form.created`，2.0 用表单取代了 question 工具)
+ * 只有在“用户看不到这个 opencode 会话”时，才通过飞书机器人私聊推送状态：
+ * - 任务完成（`session.execution.succeeded` / `session.idle` 兜底）
+ * - 会话出错（`session.execution.failed`）
+ * - 权限请求（`permission.asked`）
+ * - Agent 提问（`form.created`）
  *
- * 消息以交互式卡片发送，过滤子 agent 会话避免刷屏。
+ * ## “在看 / 不在看”判定（detached 模式）
  *
- * 环境变量配置（全部可选，缺失必需项时插件静默禁用）：
- * - FEISHU_APP_ID            飞书应用 App ID（必需）
- * - FEISHU_APP_SECRET        飞书应用 App Secret（必需）
- * - FEISHU_NOTIFY_OPEN_ID    接收人 open_id（ou_ 开头，二选一）
- * - FEISHU_NOTIFY_MOBILE     接收人手机号，带区号如 +8613800138000（二选一）
- * - FEISHU_NOTIFY_EMAIL      接收人邮箱（二选一，优先级低于 open_id/mobile）
- * - FEISHU_API_BASE          API 域名，默认 https://open.feishu.cn
- * - FEISHU_PROXY             出网代理，如 http://proxy:3128（可选）
- * - FEISHU_NOTIFY_WHEN       always（默认，总是发送）| detached（仅当"人看不到"时发送：
- *                            herdr/zellij/tmux 无人 attached；裸 SSH 一律不发；本地裸终端按
- *                            键鼠空闲判定人是否离开）
- * - FEISHU_PRESENT_IDLE_SEC  本地裸终端在场阈值秒数（默认 300；键鼠空闲 ≥ 阈值视为离开；
- *                            设 0 禁用在场检测，本地裸终端始终发送）
+ * 详见 README。要点：
+ * - presence（有人吗）：本地=键鼠空闲；远程=mux attached
+ * - attention（在看这个页面吗）：opencode 自身 `unread`（`time.idle > time.viewed`）+ mux pane 级
+ * - “本地 / 远程”与“是否在复用器里”正交：
+ *     notify = unread
+ *           || (inMux && !muxOk)
+ *           || (localSeat && !sessionRemote && idleSec >= FEISHU_PRESENT_IDLE_SEC)
+ * - 探测逻辑在 `detect.ts`（纯函数可单测）。
  *
- * 所需应用权限：
- * - im:message:send_as_bot      发送私聊消息
- * - contact:user.id:readonly    通过手机号/邮箱查 open_id
+ * ## 环境变量
+ * - FEISHU_APP_ID / FEISHU_APP_SECRET  必需
+ * - FEISHU_NOTIFY_OPEN_ID / _MOBILE / _EMAIL  接收人（三选一）
+ * - FEISHU_NOTIFY_WHEN   always（默认）| detached（仅“看不到”时发送）
+ * - FEISHU_PRESENT_IDLE_SEC   本地键鼠空闲阈值秒（默认 300）
+ * - FEISHU_VIEW_SETTLE_MS     读取 unread 前的等待毫秒（默认 1000）
+ * - FEISHU_UNREAD  0 关闭 unread 信号（默认 1）
+ * - FEISHU_API_BASE / FEISHU_PROXY / FEISHU_LOG / FEISHU_DEBUG  可选
  */
 import { Plugin } from "@opencode/plugin"
-import { execFile } from "node:child_process"
 import { appendFileSync, closeSync, openSync, writeSync } from "node:fs"
+import {
+  collectEnvSignals,
+  decidePresent,
+  tuiProcs,
+  type Signals,
+} from "./detect.ts"
 
-// server 进程 stdout 是 /dev/null，日志只能写本地文件。
+// ---------------------------------------------------------------------------
+// 日志
+// ---------------------------------------------------------------------------
+
 const LOG_PATH = process.env.FEISHU_LOG ?? "/tmp/opencode/feishu-notify.log"
+const DEBUG = process.env.FEISHU_DEBUG === "1"
 const log = (level: string, message: string) => {
   try {
     appendFileSync(LOG_PATH, `${new Date().toISOString()} [${level}] feishu-notify: ${message}\n`)
@@ -40,30 +49,18 @@ const log = (level: string, message: string) => {
     /* ignore */
   }
 }
+const dbg = (message: string) => {
+  if (DEBUG) log("debug", message)
+}
 
-/** opencode TUI 进程持有的 pty（跳过 serve --service，它没有终端） */
-const tuiPtys = (): Promise<string[]> =>
-  new Promise((resolve) => {
-    execFile("ps", ["-eo", "tty,args"], { timeout: 3000, maxBuffer: 1 << 20 }, (err, out) => {
-      if (err) return resolve([])
-      resolve([
-        ...new Set(
-          String(out)
-            .split("\n")
-            .filter((l) => l.includes("opencode") && !l.includes("serve --service"))
-            .map((l) => l.trim().split(/\s+/)[0] ?? "")
-            .filter((t) => /^pts\/\d+$/.test(t)),
-        ),
-      ])
-    })
-  })
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/**
- * 往所有 TUI pty 写 OSC 9 桌面通知序列。
- * server 进程 stdout 是 /dev/null，写 stdout 会被丢弃，所以定位 TUI 的 pty 写进去。
- */
+// ---------------------------------------------------------------------------
+// 本地提示（OSC 9 写进 TUI 的 pty）
+// ---------------------------------------------------------------------------
+
 const notifyTerminal = async (message: string): Promise<void> => {
-  for (const tty of await tuiPtys()) {
+  for (const { tty } of await tuiProcs()) {
     try {
       const fd = openSync(`/dev/${tty}`, "w")
       try {
@@ -76,17 +73,6 @@ const notifyTerminal = async (message: string): Promise<void> => {
     }
   }
 }
-
-/**
- * 执行 shell 命令并返回 stdout；出错一律返回空串（等价原 BunShell 的
- * `$\`...\`.nothrow().text()`）。仅在需要管道（如 `ioreg | awk`）时使用。
- */
-const sh = (cmd: string): Promise<string> =>
-  new Promise((resolve) => {
-    execFile("/bin/sh", ["-c", cmd], { timeout: 5000, maxBuffer: 1 << 20 }, (err, out) =>
-      resolve(err ? "" : String(out)),
-    )
-  })
 
 // ---------------------------------------------------------------------------
 // 配置
@@ -147,7 +133,6 @@ class FeishuClient {
     const res = await fetch(`${this.cfg.apiBase}${path}`, init as RequestInit)
     const data = (await res.json().catch(() => ({}))) as Record<string, any>
 
-    // token 失效（99991661/99991663/99991668 等）时强制刷新重试一次
     if (opts.auth && opts.retryToken !== false && data.code === 99991661) {
       this.token = undefined
       return this.req(method, path, { ...opts, retryToken: false })
@@ -163,7 +148,6 @@ class FeishuClient {
     if (data.code !== 0 || !data.tenant_access_token) {
       throw new Error(`feishu: get token failed: ${data.code} ${data.msg}`)
     }
-    // 提前 5 分钟过期，避免边界失效
     this.token = {
       value: data.tenant_access_token,
       expireAt: Date.now() + (data.expire ?? 7200) * 1000 - 5 * 60 * 1000,
@@ -227,7 +211,6 @@ const KIND_META: Record<NotifyKind, { title: string; template: string }> = {
   question: { title: "❓ opencode 等待回答", template: "blue" },
 }
 
-/** 本地提示文案（OSC 9 通知条空间有限，保持简短） */
 const BELL_TEXT: Record<NotifyKind, string> = {
   done: "任务完成",
   error: "会话出错",
@@ -237,8 +220,6 @@ const BELL_TEXT: Record<NotifyKind, string> = {
 
 const mdEscape = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-
-const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 const fmtDuration = (ms: number): string => {
   if (ms < 0 || !Number.isFinite(ms)) return "-"
@@ -269,71 +250,6 @@ const buildCard = (kind: NotifyKind, lines: string[], footer: string) => ({
 })
 
 // ---------------------------------------------------------------------------
-// 复用器 attached 检测（macOS 无 ss 时的等价实现）
-// ---------------------------------------------------------------------------
-
-/**
- * 从 `netstat -f unix` 输出判断 zellij 会话 socket 是否有客户端连接。
- * 与 Linux `ss -x` 的 ESTAB 判定同构：
- * - 路径行（尾列为 socket 路径，形如 $TMPDIR/zellij-<uid>/<contract>/<会话名>）
- * - 已连接的 unix stream 是两行互指：客户端行的 Conn 列 = 服务端行（路径行）的 Address 列
- * 列序：Address Type Recv-Q Send-Q Inode Conn Refs Nextref Addr
- */
-export const zellijAttachedFromNetstat = (out: string, session: string): boolean => {
-  const pathRe = new RegExp(`zellij[^/]*(?:/[^/]+)?/${escapeRegExp(session)}\\s*$`)
-  const lines = out.split("\n")
-  const pcbs = new Set<string>()
-  for (const l of lines) {
-    if (!pathRe.test(l)) continue
-    const addr = l.trim().split(/\s+/)[0]
-    if (addr) pcbs.add(addr)
-  }
-  if (pcbs.size === 0) return false
-  return lines.some((l) => {
-    const c = l.trim().split(/\s+/)
-    return c[1] === "stream" && c[5] !== undefined && pcbs.has(c[5])
-  })
-}
-
-/**
- * 从 `netstat -f unix` 输出判断 herdr UI 客户端 socket 是否有客户端连接。
- * 原理同 zellijAttachedFromNetstat：`herdr-client.sock` 路径行与客户端行互指。
- */
-export const herdrAttachedFromNetstat = (out: string): boolean => {
-  const lines = out.split("\n")
-  const pcbs = new Set<string>()
-  for (const l of lines) {
-    if (!l.includes("herdr-client.sock")) continue
-    const addr = l.trim().split(/\s+/)[0]
-    if (addr) pcbs.add(addr)
-  }
-  if (pcbs.size === 0) return false
-  return lines.some((l) => {
-    const c = l.trim().split(/\s+/)
-    return c[1] === "stream" && c[5] !== undefined && pcbs.has(c[5])
-  })
-}
-
-// ---------------------------------------------------------------------------
-// 本地在场检测（macOS 裸终端用，无复用器时判断人是否在电脑前）
-// ---------------------------------------------------------------------------
-
-/**
- * 根据键鼠空闲秒数判断人是否在电脑前：
- * - idleSec 未知（undefined）→ undefined（无法判定，调用方 fail-open）
- * - idleSec < threshold → true（人在场）
- * - idleSec >= threshold → false（人已离开）
- * - threshold 为 0 时恒为 false（禁用在场检测，始终按"离开"处理）
- */
-export const presentFromIdle = (
-  idleSec: number | undefined,
-  threshold: number,
-): boolean | undefined => {
-  if (idleSec === undefined) return undefined
-  return idleSec < threshold
-}
-
-// ---------------------------------------------------------------------------
 // 插件
 // ---------------------------------------------------------------------------
 
@@ -356,101 +272,94 @@ export default Plugin.define({
       (ctx.location as any)?.project?.directory ||
       directory
     const projectName = projectRoot.split("/").filter(Boolean).pop() || directory
+
     const notifyWhen =
       process.env.FEISHU_NOTIFY_WHEN?.trim() === "detached" ? "detached" : "always"
-    // 本地裸终端的在场阈值（秒）：键鼠空闲超过该时长视为"人已离开"；0 = 禁用在场检测
+
     const idleRaw = Number(process.env.FEISHU_PRESENT_IDLE_SEC?.trim())
     const presentIdleSec = Number.isFinite(idleRaw) && idleRaw >= 0 ? idleRaw : 300
+
+    const settleRaw = Number(process.env.FEISHU_VIEW_SETTLE_MS?.trim())
+    const viewSettleMs = Number.isFinite(settleRaw) && settleRaw >= 0 ? settleRaw : 1000
+
+    const unreadEnabled = process.env.FEISHU_UNREAD?.trim() !== "0"
+
+    // 若 opencode 的 session 信息始终不暴露 time.viewed，则关闭 unread，避免误判刷屏。
+    let viewedSeen = false
+    let unreadProbeCount = 0
 
     log("info", `enabled (notify_when=${notifyWhen}) dir=${directory}`)
 
     /**
-     * macOS 本机人是否在电脑前（全局键鼠空闲时长，无需任何权限）；失败 → undefined
+     * 读取 opencode 自身的“未读”状态：
+     *   unread = time.idle > time.viewed（或 viewed 缺失）
+     * 语义 = 该轮跑完了，但显示它的那个 TUI 还没确认（失焦 / 显示别的 tab）。
+     * 需先等待 settle，避免与 TUI 的标记竞态。
      */
-    const isUserPresentOnMac = async (): Promise<boolean | undefined> => {
+    const readUnread = async (sessionID: string): Promise<boolean> => {
+      if (!unreadEnabled) return false
+      if (viewSettleMs > 0) await sleep(viewSettleMs)
       try {
-        const out =
-          await sh(`ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}'`)
-        const t = out.trim()
-        if (!/^\d+$/.test(t)) return undefined
-        return presentFromIdle(Number(t) / 1e9, presentIdleSec)
-      } catch {
-        return undefined
-      }
-    }
-
-    /**
-     * 用户是否 attached 在终端复用器上 / 人是否在场（人在屏幕前）：
-     * - herdr:  UI 客户端 socket 上有客户端连接
-     *   - Linux: `ss -x` 的 ESTAB 行
-     *   - macOS: 无 ss，用内置 `netstat -f unix`（见 herdrAttachedFromNetstat）
-     * - zellij: 会话 socket 上有客户端连接
-     *   - Linux: `ss -x` 匹配 /run/user/$UID/zellij/<版本>/<会话名> 的 ESTAB 行
-     *   - macOS: 无 ss，用内置 `netstat -f unix`（见 zellijAttachedFromNetstat）
-     * - tmux:   tmux list-clients 有输出
-     * - 裸终端:
-     *   - SSH/远程会话：无法感知对端是否有人在看 → 视为在场（不发）
-     *   - macOS 本机: 键鼠空闲 < FEISHU_PRESENT_IDLE_SEC 视为在场（不发），
-     *     离开/检测失败 → 视为不在场（发，fail-open 宁发勿漏）
-     *   - 其他平台 / 检测失败 → 视为不在场（照发）
-     */
-    const isUserAttached = async (): Promise<boolean> => {
-      try {
-        if (process.env.HERDR_ENV === "1") {
-          if (process.platform === "darwin") {
-            const out = await sh(`netstat -f unix`)
-            return herdrAttachedFromNetstat(out)
+        const s: any = await ctx.session.get({ sessionID })
+        const idle = s?.time?.idle
+        const viewed = s?.time?.viewed
+        unreadProbeCount++
+        if (typeof viewed === "number") viewedSeen = true
+        if (idle === undefined || idle === null) return false
+        if (!viewedSeen) {
+          // 该 API 可能不暴露 viewed：前几次探测不予采信；持续如此则永久关闭
+          if (unreadProbeCount >= 5) {
+            log("warn", "session.time.viewed not exposed; disabling unread signal")
+            viewedSeen = false
+            return false
           }
-          const out = await sh(`ss -x`)
-          return out
-            .split("\n")
-            .some((l) => l.includes("ESTAB") && l.includes("herdr-client.sock"))
+          return false
         }
-        const zellijSession = process.env.ZELLIJ_SESSION_NAME?.trim()
-        if (zellijSession) {
-          if (process.platform === "darwin") {
-            const out = await sh(`netstat -f unix`)
-            return zellijAttachedFromNetstat(out, zellijSession)
-          }
-          const out = await sh(`ss -x`)
-          const re = new RegExp(`zellij/[^/]+/${escapeRegExp(zellijSession)}\\s`)
-          return out.split("\n").some((l) => l.includes("ESTAB") && re.test(l))
-        }
-        if (process.env.TMUX?.trim()) {
-          const out = await sh(`tmux list-clients`)
-          return out.trim().length > 0
-        }
-        if (process.env.SSH_CONNECTION?.trim()) return true
-        if (process.platform === "darwin") {
-          return (await isUserPresentOnMac()) ?? false
-        }
-        return false
+        return viewed === undefined || viewed === null || idle > viewed
       } catch {
         return false
       }
     }
 
-    /**
-     * 本地提示（人在电脑前时用）：
-     * 服务端进程的 stdout 是 /dev/null，OSC 9 直接写 stdout 会被丢弃，
-     * 改为定位 opencode TUI 进程持有的 pty，把转义序列写进去，
-     * 由客户端终端渲染出桌面通知/响铃。
-     */
-    const bellLocally = async (kind: NotifyKind) => {
-      await notifyTerminal(`opencode: ${BELL_TEXT[kind]}`)
+    /** 计算“用户能看到”。 */
+    const computePresent = async (sessionID?: string): Promise<boolean> => {
+      try {
+        const env = await collectEnvSignals()
+        const unread = sessionID ? await readUnread(sessionID) : false
+        const signals: Signals = { ...env, unread }
+        const present = decidePresent(signals, { presentIdleSec })
+        log(
+          "info",
+          `decide present=${present} session=${sessionID ?? "-"} unread=${unread} ` +
+            `remote=${env.sessionRemote} idleSec=${env.idleSec ?? "-"} mux=${JSON.stringify(env.muxes)}`,
+        )
+        return present
+      } catch (e) {
+        log("warn", `decision failed: ${e instanceof Error ? e.message : String(e)}`)
+        return false // fail-open：判定失败时按“看不到”处理（宁发勿漏）
+      }
     }
 
-    /** 发送通知；任何失败只记日志，绝不影响 opencode 主流程 */
-    const notify = async (kind: NotifyKind, lines: string[], footerExtra?: string) => {
-      if (notifyWhen === "detached" && (await isUserAttached())) {
-        // 人在电脑前：走本地提示，不发飞书（避免刷屏）
-        await bellLocally(kind)
-        return
+    /** 发送通知；失败只记日志，绝不影响 opencode 主流程。 */
+    const notify = async (
+      kind: NotifyKind,
+      sessionID: string | undefined,
+      lines: string[],
+      footerExtra?: string,
+    ) => {
+      if (notifyWhen === "detached") {
+        const present = await computePresent(sessionID)
+        if (present) {
+          // 人在看：走本地提示，不发飞书（避免刷屏）
+          await notifyTerminal(`opencode: ${BELL_TEXT[kind]}`)
+          return
+        }
       }
       try {
         const time = new Date().toLocaleString("zh-CN", { hour12: false })
         const footer = [projectName, footerExtra, time].filter(Boolean).join(" · ")
         await feishu.sendCard(buildCard(kind, lines, footer))
+        log("info", `sent kind=${kind} session=${sessionID ?? "-"}`)
       } catch (e) {
         log("warn", `send failed: ${e instanceof Error ? e.message : String(e)}`)
       }
@@ -492,7 +401,6 @@ export default Plugin.define({
     const normalize = (s: string) => s.replace(/\s+/g, " ").trim()
     const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "…" : s)
 
-    /** 任务上下文：首条用户消息（任务）与末条 assistant 回复（结果） */
     const taskContext = async (
       sessionID: string,
     ): Promise<{ task: string; result: string }> => {
@@ -523,15 +431,9 @@ export default Plugin.define({
     ]
 
     // ── v2 事件订阅 ──────────────────────────────────────────────────────
-    // v2 会丢弃 setup 的返回值里的钩子对象，事件必须用
-    // ctx.event.subscribe({ signal }) 订阅；signal 中止时迭代结束。
-    // 去重：同一权限/表单可能多次出现，按 id 记录，replied/cancelled 时清除。
-
     const controller = new AbortController()
     const seenPermissions = new Set<string>()
     const seenForms = new Set<string>()
-    // v2 一轮结束的可靠事件是 session.execution.succeeded；个别版本还会再发
-    // session.idle。两者都来也只通知一次：新一轮 session.execution.started 时清除标记。
     const doneNotified = new Set<string>()
 
     const notifyDone = async (sessionID: string, via: string) => {
@@ -541,6 +443,7 @@ export default Plugin.define({
       const [info, t] = await Promise.all([sessionInfo(sessionID), taskContext(sessionID)])
       await notify(
         "done",
+        sessionID,
         ["任务已完成，回来查看结果吧。", ...taskLines(t, true), ...info],
         via,
       )
@@ -548,14 +451,12 @@ export default Plugin.define({
 
     const onEvent = async (event: { type: string; data: any }) => {
       switch (event.type) {
-        // 新一轮开始：清除上一轮的「已完成」标记
         case "session.execution.started": {
           const sessionID: string | undefined = event.data?.sessionID
           if (sessionID) doneNotified.delete(sessionID)
           break
         }
 
-        // 任务完成（v2：execution.succeeded 为主，session.idle 兜底）
         case "session.execution.succeeded":
         case "session.idle": {
           const sessionID: string | undefined = event.data?.sessionID
@@ -563,19 +464,17 @@ export default Plugin.define({
           break
         }
 
-        // 会话出错
         case "session.execution.failed": {
           const sessionID: string | undefined = event.data?.sessionID
           if (sessionID && !(await isPrimarySession(sessionID))) return
           const errMsg: string | undefined = event.data?.error?.message || event.data?.error?.type
           const [info, t] = await Promise.all([
             sessionID ? sessionInfo(sessionID) : Promise.resolve([] as string[]),
-            sessionID
-              ? taskContext(sessionID)
-              : Promise.resolve({ task: "", result: "" }),
+            sessionID ? taskContext(sessionID) : Promise.resolve({ task: "", result: "" }),
           ])
           await notify(
             "error",
+            sessionID,
             [
               "会话出现错误。",
               ...taskLines(t),
@@ -587,7 +486,6 @@ export default Plugin.define({
           break
         }
 
-        // 权限请求
         case "permission.asked": {
           const { sessionID, id, action, resources } = event.data ?? {}
           if (id && seenPermissions.has(id)) return
@@ -602,12 +500,11 @@ export default Plugin.define({
             : ""
           const [info, t] = await Promise.all([
             sessionID ? sessionInfo(sessionID) : Promise.resolve([] as string[]),
-            sessionID
-              ? taskContext(sessionID)
-              : Promise.resolve({ task: "", result: "" }),
+            sessionID ? taskContext(sessionID) : Promise.resolve({ task: "", result: "" }),
           ])
           await notify(
             "permission",
+            sessionID,
             ["Agent 正在等待你批准权限操作。", ...(detail ? [detail] : []), ...taskLines(t), ...info],
             "permission.asked",
           )
@@ -619,7 +516,6 @@ export default Plugin.define({
           break
         }
 
-        // Agent 提问（v2 用表单取代了 question 工具）
         case "form.created": {
           const form = event.data?.form
           if (!form?.id) return
@@ -629,12 +525,11 @@ export default Plugin.define({
           if (sessionID && !(await isPrimarySession(sessionID))) return
           const [info, t] = await Promise.all([
             sessionID ? sessionInfo(sessionID) : Promise.resolve([] as string[]),
-            sessionID
-              ? taskContext(sessionID)
-              : Promise.resolve({ task: "", result: "" }),
+            sessionID ? taskContext(sessionID) : Promise.resolve({ task: "", result: "" }),
           ])
           await notify(
             "question",
+            sessionID,
             [
               "Agent 有问题需要你回答。",
               ...(form.title ? [`**问题**：${mdEscape(String(form.title))}`] : []),
@@ -670,7 +565,6 @@ export default Plugin.define({
       }
     })()
 
-    // 插件卸载时中止订阅
     return () => controller.abort()
   },
 })
