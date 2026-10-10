@@ -11,11 +11,12 @@
  *
  * 详见 README。要点：
  * - presence（有人吗）：本地=键鼠空闲；远程=mux attached
- * - attention（在看这个页面吗）：opencode 自身 `unread`（`time.idle > time.viewed`）+ mux pane 级
- * - “本地 / 远程”与“是否在复用器里”正交：
+ * - attention（在看这个页面吗）：opencode 自身 `unread`（`time.idle > time.viewed`）+ mux attached
+ * - 关掉终端 / 断开 / 切走，都会命中：
  *     notify = unread
  *           || (inMux && !muxOk)
- *           || (localSeat && !sessionRemote && idleSec >= FEISHU_PRESENT_IDLE_SEC)
+ *           || (localSeat && !sessionRemote && muxOk && idleSec >= FEISHU_PRESENT_IDLE_SEC)
+ *   其中 idleSec 只用于本地（远程测不到本机键鼠）。
  * - 探测逻辑在 `detect.ts`（纯函数可单测）。
  *
  * ## 环境变量
@@ -324,9 +325,7 @@ export default Plugin.define({
     const computePresent = async (sessionID?: string): Promise<boolean> => {
       try {
         const env = await collectEnvSignals()
-        const local = env.localSeat && !env.sessionRemote
-        // 本地只看键鼠，无需 opencode 的 unread（也省掉 settle 等待，bell 更快）
-        const unread = !local && sessionID ? await readUnread(sessionID) : false
+        const unread = sessionID ? await readUnread(sessionID) : false
         const signals: Signals = { ...env, unread }
         const present = decidePresent(signals, { presentIdleSec })
         log(

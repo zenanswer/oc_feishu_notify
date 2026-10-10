@@ -6,7 +6,7 @@
  * 设计要点（详见 README / 方案）：
  * - 信号分两类，语义分离：
  *   - presence（有人吗）：本地=键鼠空闲；远程=mux attached
- *   - attention（在看这个页面吗）：unread（opencode 自身的 viewed 状态）+ mux pane 级
+ *   - attention（在看这个页面吗）：unread（opencode 自身的 viewed 状态）+ mux 是否 attached
  * - “本地 / 远程”与“是否在复用器里”正交，不做二选一。
  * - 无头/远程机测不到键鼠空闲 → 自动退回 mux 判定。
  *
@@ -433,17 +433,27 @@ export type DecisionConfig = { presentIdleSec: number }
 
 /**
  * 最终判定：true = 用户能看到（不发飞书）。
- *   notify = unread || (inMux && !muxOk) || (localSeat && !sessionRemote && idleSec >= 阈值)
+ *
+ * 信号：
+ * - muxDetached：检测到的任一复用器没有 client 接着（终端被关 / 断开）→ 一定看不到
+ * - unread：opencode 自身未读（该轮跑完但 TUI 没确认，如切到别的 tab）→ 一定看不到
+ * - idleSec：本机键鼠空闲，超过阈值 = 人离开电脑（仅本地可测）
+ *
+ * 规则（notify = !present）：
+ *   本地 (localSeat && !sessionRemote):
+ *     notify = unread || muxDetached || (muxOk && idleSec >= 阈值)
+ *   远程 / 无座席:
+ *     notify = unread || muxDetached      # 远程测不到本机键鼠，不用 idleSec
+ *
+ * 注意：一旦 muxDetached 或 unread 命中就返回“看不到”，无论键鼠是否活跃——
+ * 关掉终端 / 切到别的 tab 时，人在键盘前也看不到这个会话。
  */
 export const decidePresent = (s: Signals, cfg: DecisionConfig): boolean => {
-  const local = s.localSeat && !s.sessionRemote
-  if (local) {
-    // 本地：只看键鼠。人在键盘前 → 不发飞书（由终端 bell 插件提示）；
-    // 忽略 unread 与 mux（本地在场就意味着终端能看到）。
-    return s.idleSec !== undefined && s.idleSec < cfg.presentIdleSec
-  }
-  // 远程 / 无座席：看 unread 与复用器 attached。
   if (s.unread) return false
-  if (s.muxes.length > 0 && s.muxes.some((m) => !m.attached)) return false
+  const muxOk = !s.muxes.some((m) => !m.attached)
+  if (!muxOk) return false
+  // 本地：mux 都接上时，再看键鼠；人离开电脑也算看不到。远程不测本机键鼠。
+  const local = s.localSeat && !s.sessionRemote
+  if (local && s.idleSec !== undefined && s.idleSec >= cfg.presentIdleSec) return false
   return true
 }

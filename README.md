@@ -78,21 +78,22 @@ export FEISHU_NOTIFY_WHEN="detached"
 “看不看得到”拆成两类信号：
 
 - **presence（有人吗）**：本地 → 键鼠空闲；远程 → 复用器 attached
-- **attention（在看这个页面吗）**：opencode 自身 `unread` + 复用器 pane 级
+- **attention（在看这个页面吗）**：opencode 自身 `unread` + 复用器 attached
 
 “本地 / 远程”与“是否在复用器里”是**正交**的（本地也可能套在 tmux/herdr/zellij 里），所以并列组合：
 
 ```
 unread        = session.time.idle > session.time.viewed   # 该轮完成但 TUI 没确认（失焦 / 显示别的 tab）
 inMux         = TUI 跑在 herdr/zellij/tmux 里
-muxOk         = 所有检测到的复用器都“有人接着”
+muxOk         = 所有检测到的复用器都“有人接着”（没检测到复用器时视为 true）
 localSeat     = 本机有交互座席（键鼠空闲可测）
 sessionRemote = 会话来自 ssh/远程（socket 反查对端进程）
 
-本地 (localSeat && !sessionRemote):
-    notify = idleSec >= FEISHU_PRESENT_IDLE_SEC     # 只看键鼠：人在键盘前就不发，交给终端 bell 插件
-其他 (远程 / 无座席):
-    notify = unread || (inMux && !muxOk)
+任一命中即“看不到”（发飞书）：
+    muxDetached = inMux && !muxOk                      # 终端被关 / 断开
+    unread                                             # client 还连着，但没看这个会话（切了 tab）
+    本地 (localSeat && !sessionRemote) 另加：
+        muxOk && idleSec >= FEISHU_PRESENT_IDLE_SEC    # 人走开（远程测不到本机键鼠，故不参与）
 ```
 
 | 信号 | 探测方式 |
@@ -106,8 +107,11 @@ sessionRemote = 会话来自 ssh/远程（socket 反查对端进程）
 
 要点与局限：
 
-- **本地只看键鼠**：只要 `idleSec < 阈值`（你在用电脑）就**一律不发飞书**——即使切到了别的 app / 别的 opencode tab（此时由终端 bell 插件提示）。因此本地不计算 `unread`，也没有 settle 延迟。
-- **`unread` 是「注意力」信号，不是「有人吗」**：它只用于**远程/无座席**分支；本地用键鼠空闲即可。
+- **关终端 / 断开一定发**：检测到复用器（herdr/zellij/tmux）但没有 client 接着 → 无论人在不在键盘前，都发飞书。
+- **切走也发（`unread`）**：client 还连着，但这条 opencode 会话跑完未被 TUI 确认（失焦 / 显示别的 tab）→ 发。
+- **本地“人走开”**：复用器都接着时，本机键鼠空闲超阈值 → 发。**远程测不到本机键鼠**，故远程不参与 `idleSec` 判定（只能靠 `muxDetached` / `unread`）。
+- **本地在场且在看**：以上都不命中 → 不发飞书，交给终端 bell 插件。
+- **`unread` 与 `idleSec` 互补**：`unread` 是「注意力」（连着但没看），`idleSec` 是「人还在吗」（本地可测）。两者任一命中都会发。
 - **远程无法感知“屏幕前有没有人”**：远端插件只能知道 client 是否 attached、在看哪个 pane。因此“client 仍 attached 但你人已离开笔记本”远程**无法**检测 → 不提醒（只能靠 detach/断连）。
 - tmux 默认 `focus-events off`：`unread` 对 tmux 无效，但 tmux 走原生 `window_active_clients`，不受影响。
 - zellij 不支持 1004 聚焦事件：`unread` 感知不到 zellij 切 tab，改用 `list-clients` pane 级。

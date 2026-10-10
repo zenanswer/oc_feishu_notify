@@ -38,12 +38,26 @@ test("decidePresent: 本地在看（idle 小）→ present", () => {
   assert.equal(decidePresent(sig(), CFG), true)
 })
 
-test("decidePresent: 本地 unread 也忽略（人在键盘前就不发）", () => {
-  assert.equal(decidePresent(sig({ unread: true }), CFG), true)
+test("decidePresent: 本地切到别的 tab（unread）→ 不 present", () => {
+  assert.equal(decidePresent(sig({ unread: true }), CFG), false)
 })
 
-test("decidePresent: 本地 mux detached 也忽略", () => {
-  assert.equal(decidePresent(sig({ muxes: [{ kind: "tmux", attached: false }] }), CFG), true)
+test("decidePresent: 本地关掉终端（mux detached）→ 不 present（即使人在键盘前）", () => {
+  assert.equal(decidePresent(sig({ idleSec: 0.1, muxes: [{ kind: "herdr", attached: false }] }), CFG), false)
+})
+
+test("decidePresent: 本地终端仍接着（mux attached）+ 在看 → present", () => {
+  assert.equal(
+    decidePresent(sig({ idleSec: 1, muxes: [{ kind: "herdr", attached: true }] }), CFG),
+    true,
+  )
+})
+
+test("decidePresent: 本地 mux attached 但人走开（空闲超阈值）→ 不 present", () => {
+  assert.equal(
+    decidePresent(sig({ idleSec: 301, muxes: [{ kind: "herdr", attached: true }] }), CFG),
+    false,
+  )
 })
 
 test("decidePresent: 本地走开（空闲超阈值）→ 不 present", () => {
