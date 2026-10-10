@@ -172,6 +172,7 @@ export type MuxEnv = {
   zellijSession?: string
   zellijPane?: string
   tmuxPane?: string
+  tmuxSocket?: string
 }
 
 /** 从某个 TUI 的 env 提取与本方案相关的复用器信息。 */
@@ -181,6 +182,8 @@ export const pickMuxEnv = (e: Record<string, string>): MuxEnv => ({
   zellijSession: e.ZELLIJ_SESSION_NAME || undefined,
   zellijPane: e.ZELLIJ_PANE_ID || undefined,
   tmuxPane: e.TMUX ? e.TMUX_PANE || "" : undefined,
+  // TMUX 形如 `<socket-path>,<pid>,<session>`；显式带上 socket 才能命中非默认 -L/-S 的 server
+  tmuxSocket: e.TMUX ? e.TMUX.split(",")[0] || undefined : undefined,
 })
 
 // ---------------------------------------------------------------------------
@@ -338,16 +341,18 @@ export const parseWindowActiveClients = (out: string): number | undefined => {
 
 export const tmuxProbe = async (
   panes: string[],
+  socket?: string,
 ): Promise<{ attached: boolean; remote?: boolean }> => {
+  const pre = socket ? ["-S", socket] : []
   let attached = false
   for (const pane of panes) {
     const n = parseWindowActiveClients(
-      await run("tmux", ["display-message", "-p", "-t", pane, "#{window_active_clients}"]),
+      await run("tmux", [...pre, "display-message", "-p", "-t", pane, "#{window_active_clients}"]),
     )
     if (n !== undefined && n > 0) attached = true
   }
   const pids = uniq(
-    (await run("tmux", ["list-clients", "-F", "#{client_pid}"]))
+    (await run("tmux", [...pre, "list-clients", "-F", "#{client_pid}"]))
       .split("\n")
       .map((s) => s.trim())
       .filter((s) => /^\d+$/.test(s)),
@@ -383,6 +388,7 @@ export const collectEnvSignals = async (): Promise<EnvSignals> => {
     muxEnvs.map((m) => m.zellijSession).filter((x): x is string => !!x),
   )
   const tmuxPanes = uniq(muxEnvs.map((m) => m.tmuxPane).filter((x): x is string => x !== undefined))
+  const tmuxSocket = muxEnvs.map((m) => m.tmuxSocket).find((x): x is string => !!x)
 
   const muxes: MuxState[] = []
   let clientRemote: boolean | undefined
@@ -403,7 +409,7 @@ export const collectEnvSignals = async (): Promise<EnvSignals> => {
     mergeRemote(r.remote)
   }
   if (tmuxPanes.length) {
-    const r = await tmuxProbe(tmuxPanes)
+    const r = await tmuxProbe(tmuxPanes, tmuxSocket)
     muxes.push({ kind: "tmux", attached: r.attached })
     mergeRemote(r.remote)
   }

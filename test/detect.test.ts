@@ -17,6 +17,7 @@ import {
   parseWindowActiveClients,
   parseXprintidle,
   parseZellijClients,
+  pickMuxEnv,
   unixSocketPeer,
   type Signals,
 } from "../detect.ts"
@@ -199,4 +200,33 @@ test("herdrClientSocket: herdr.sock → herdr-client.sock", () => {
   assert.equal(herdrClientSocket("/x/herdr.sock"), "/x/herdr-client.sock")
   assert.equal(herdrClientSocket("/x/herdr-client.sock"), "/x/herdr-client.sock")
   assert.equal(herdrClientSocket(undefined), join(homedir(), ".config", "herdr", "herdr-client.sock"))
+})
+
+// --- mux env 解析 ---
+
+test("pickMuxEnv: 解析 tmux socket/pane、ssh、herdr、zellij", () => {
+  const m = pickMuxEnv({
+    TMUX: "/private/tmp/tmux-501/pt,38816,0",
+    TMUX_PANE: "%1",
+    SSH_CONNECTION: "1.2.3.4 1 5.6.7.8 2",
+    HERDR_ENV: "1",
+    HERDR_SOCKET_PATH: "/x/herdr.sock",
+    ZELLIJ_SESSION_NAME: "z1",
+    ZELLIJ_PANE_ID: "terminal_3",
+  })
+  assert.equal(m.tmuxSocket, "/private/tmp/tmux-501/pt")
+  assert.equal(m.tmuxPane, "%1")
+  assert.equal(m.ssh, true)
+  assert.equal(m.herdrSocket, "/x/herdr.sock")
+  assert.equal(m.zellijSession, "z1")
+  assert.equal(m.zellijPane, "terminal_3")
+})
+
+test("pickMuxEnv: 无 mux env → 全部 undefined / ssh=false", () => {
+  const m = pickMuxEnv({ PATH: "/usr/bin" })
+  assert.equal(m.ssh, false)
+  assert.equal(m.tmuxSocket, undefined)
+  assert.equal(m.tmuxPane, undefined)
+  assert.equal(m.herdrSocket, undefined)
+  assert.equal(m.zellijSession, undefined)
 })
