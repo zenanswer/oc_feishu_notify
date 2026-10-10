@@ -34,8 +34,16 @@ const sig = (over: Partial<Signals> = {}): Signals => ({
 
 const CFG = { presentIdleSec: 300 }
 
-test("decidePresent: 本地在看 → present", () => {
+test("decidePresent: 本地在看（idle 小）→ present", () => {
   assert.equal(decidePresent(sig(), CFG), true)
+})
+
+test("decidePresent: 本地 unread 也忽略（人在键盘前就不发）", () => {
+  assert.equal(decidePresent(sig({ unread: true }), CFG), true)
+})
+
+test("decidePresent: 本地 mux detached 也忽略", () => {
+  assert.equal(decidePresent(sig({ muxes: [{ kind: "tmux", attached: false }] }), CFG), true)
 })
 
 test("decidePresent: 本地走开（空闲超阈值）→ 不 present", () => {
@@ -46,21 +54,29 @@ test("decidePresent: 空闲正好等于阈值 → 视为离开", () => {
   assert.equal(decidePresent(sig({ idleSec: 300 }), CFG), false)
 })
 
-test("decidePresent: unread → 不 present", () => {
-  assert.equal(decidePresent(sig({ unread: true }), CFG), false)
-})
-
-test("decidePresent: 在 mux 但 detached → 不 present", () => {
-  assert.equal(decidePresent(sig({ muxes: [{ kind: "tmux", attached: false }] }), CFG), false)
-})
-
-test("decidePresent: 在 mux 且 attached → present", () => {
-  assert.equal(decidePresent(sig({ muxes: [{ kind: "herdr", attached: true }] }), CFG), true)
-})
-
-test("decidePresent: 远程时忽略键鼠空闲（大 idle 也 present）", () => {
+test("decidePresent: 远程 unread → 不 present", () => {
   assert.equal(
-    decidePresent(sig({ sessionRemote: true, idleSec: 99999, muxes: [{ kind: "herdr", attached: true }] }), CFG),
+    decidePresent(
+      sig({ sessionRemote: true, unread: true, muxes: [{ kind: "herdr", attached: true }] }),
+      CFG,
+    ),
+    false,
+  )
+})
+
+test("decidePresent: 远程 mux detached → 不 present", () => {
+  assert.equal(
+    decidePresent(sig({ sessionRemote: true, muxes: [{ kind: "tmux", attached: false }] }), CFG),
+    false,
+  )
+})
+
+test("decidePresent: 远程 mux attached 且在看 → present（忽略本机空闲）", () => {
+  assert.equal(
+    decidePresent(
+      sig({ sessionRemote: true, idleSec: 99999, muxes: [{ kind: "herdr", attached: true }] }),
+      CFG,
+    ),
     true,
   )
 })
@@ -72,11 +88,9 @@ test("decidePresent: 远程无 mux（裸 ssh）→ present（沿用旧行为）"
   )
 })
 
-test("decidePresent: 本地无座席（测不到空闲）→ present", () => {
-  assert.equal(
-    decidePresent(sig({ localSeat: false, idleSec: undefined }), CFG),
-    true,
-  )
+test("decidePresent: 无座席（测不到空闲）→ 按远程规则处理", () => {
+  assert.equal(decidePresent(sig({ localSeat: false, idleSec: undefined }), CFG), true)
+  assert.equal(decidePresent(sig({ localSeat: false, idleSec: undefined, unread: true }), CFG), false)
 })
 
 // --- netstat ---

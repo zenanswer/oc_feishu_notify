@@ -89,9 +89,10 @@ muxOk         = 所有检测到的复用器都“有人接着”
 localSeat     = 本机有交互座席（键鼠空闲可测）
 sessionRemote = 会话来自 ssh/远程（socket 反查对端进程）
 
-notify = unread
-       || (inMux && !muxOk)
-       || (localSeat && !sessionRemote && idleSec >= FEISHU_PRESENT_IDLE_SEC)
+本地 (localSeat && !sessionRemote):
+    notify = idleSec >= FEISHU_PRESENT_IDLE_SEC     # 只看键鼠：人在键盘前就不发，交给终端 bell 插件
+其他 (远程 / 无座席):
+    notify = unread || (inMux && !muxOk)
 ```
 
 | 信号 | 探测方式 |
@@ -105,7 +106,8 @@ notify = unread
 
 要点与局限：
 
-- **`unread` 是「注意力」信号，不是「有人吗」**：本地焦点由你直接控制；远程焦点由复用器把你的客户端焦点转发给远端 TUI（herdr 实测会）。
+- **本地只看键鼠**：只要 `idleSec < 阈值`（你在用电脑）就**一律不发飞书**——即使切到了别的 app / 别的 opencode tab（此时由终端 bell 插件提示）。因此本地不计算 `unread`，也没有 settle 延迟。
+- **`unread` 是「注意力」信号，不是「有人吗」**：它只用于**远程/无座席**分支；本地用键鼠空闲即可。
 - **远程无法感知“屏幕前有没有人”**：远端插件只能知道 client 是否 attached、在看哪个 pane。因此“client 仍 attached 但你人已离开笔记本”远程**无法**检测 → 不提醒（只能靠 detach/断连）。
 - tmux 默认 `focus-events off`：`unread` 对 tmux 无效，但 tmux 走原生 `window_active_clients`，不受影响。
 - zellij 不支持 1004 聚焦事件：`unread` 感知不到 zellij 切 tab，改用 `list-clients` pane 级。

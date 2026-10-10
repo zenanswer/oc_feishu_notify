@@ -324,7 +324,9 @@ export default Plugin.define({
     const computePresent = async (sessionID?: string): Promise<boolean> => {
       try {
         const env = await collectEnvSignals()
-        const unread = sessionID ? await readUnread(sessionID) : false
+        const local = env.localSeat && !env.sessionRemote
+        // 本地只看键鼠，无需 opencode 的 unread（也省掉 settle 等待，bell 更快）
+        const unread = !local && sessionID ? await readUnread(sessionID) : false
         const signals: Signals = { ...env, unread }
         const present = decidePresent(signals, { presentIdleSec })
         log(

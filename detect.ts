@@ -436,15 +436,14 @@ export type DecisionConfig = { presentIdleSec: number }
  *   notify = unread || (inMux && !muxOk) || (localSeat && !sessionRemote && idleSec >= 阈值)
  */
 export const decidePresent = (s: Signals, cfg: DecisionConfig): boolean => {
+  const local = s.localSeat && !s.sessionRemote
+  if (local) {
+    // 本地：只看键鼠。人在键盘前 → 不发飞书（由终端 bell 插件提示）；
+    // 忽略 unread 与 mux（本地在场就意味着终端能看到）。
+    return s.idleSec !== undefined && s.idleSec < cfg.presentIdleSec
+  }
+  // 远程 / 无座席：看 unread 与复用器 attached。
   if (s.unread) return false
   if (s.muxes.length > 0 && s.muxes.some((m) => !m.attached)) return false
-  if (
-    s.localSeat &&
-    !s.sessionRemote &&
-    s.idleSec !== undefined &&
-    s.idleSec >= cfg.presentIdleSec
-  ) {
-    return false
-  }
   return true
 }
