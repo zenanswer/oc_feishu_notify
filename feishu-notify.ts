@@ -55,6 +55,19 @@ const dbg = (message: string) => {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+// opencode 会为每个 location 各加载一份插件实例，事件会广播给所有实例。
+// 去重状态放在模块作用域 → 同一进程内所有实例共享，按事件 id 只处理一次。
+const seenEvents = new Set<string>()
+const claimEvent = (id: string): boolean => {
+  if (seenEvents.has(id)) return false
+  seenEvents.add(id)
+  if (seenEvents.size > 1000) {
+    const first = seenEvents.values().next().value
+    if (first) seenEvents.delete(first)
+  }
+  return true
+}
+
 // ---------------------------------------------------------------------------
 // 本地提示（OSC 9 写进 TUI 的 pty）
 // ---------------------------------------------------------------------------
@@ -284,10 +297,6 @@ export default Plugin.define({
 
     const unreadEnabled = process.env.FEISHU_UNREAD?.trim() !== "0"
 
-    // 若 opencode 的 session 信息始终不暴露 time.viewed，则关闭 unread，避免误判刷屏。
-    let viewedSeen = false
-    let unreadProbeCount = 0
-
     log("info", `enabled (notify_when=${notifyWhen}) dir=${directory}`)
 
     /**
@@ -303,18 +312,8 @@ export default Plugin.define({
         const s: any = await ctx.session.get({ sessionID })
         const idle = s?.time?.idle
         const viewed = s?.time?.viewed
-        unreadProbeCount++
-        if (typeof viewed === "number") viewedSeen = true
         if (idle === undefined || idle === null) return false
-        if (!viewedSeen) {
-          // 该 API 可能不暴露 viewed：前几次探测不予采信；持续如此则永久关闭
-          if (unreadProbeCount >= 5) {
-            log("warn", "session.time.viewed not exposed; disabling unread signal")
-            viewedSeen = false
-            return false
-          }
-          return false
-        }
+        // viewed 缺失 = 该轮从未被 viewer 确认 → 未读
         return viewed === undefined || viewed === null || idle > viewed
       } catch {
         return false
@@ -450,6 +449,8 @@ export default Plugin.define({
     }
 
     const onEvent = async (event: { type: string; data: any }) => {
+      const eid: string | undefined = (event as any)?.id
+      if (eid && !claimEvent(eid)) return
       switch (event.type) {
         case "session.execution.started": {
           const sessionID: string | undefined = event.data?.sessionID
